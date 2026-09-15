@@ -1,0 +1,139 @@
+/*
+ * Copyright 2025 ACINQ SAS
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package fr.acinq.zeeygo.android.navigation
+
+import androidx.core.net.toUri
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.NavType
+import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
+import androidx.navigation.navOptions
+import androidx.navigation.navigation
+import fr.acinq.zeeygo.android.AppViewModel
+import fr.acinq.zeeygo.android.WalletId
+import fr.acinq.zeeygo.android.application
+import fr.acinq.zeeygo.android.initwallet.InitNewWallet
+import fr.acinq.zeeygo.android.initwallet.create.CreateWalletView
+import fr.acinq.zeeygo.android.initwallet.restore.RestoreWalletView
+import fr.acinq.zeeygo.android.intro.IntroView
+import fr.acinq.zeeygo.android.startup.StartupRecoveryView
+import fr.acinq.zeeygo.android.startup.StartupView
+import fr.acinq.zeeygo.android.startup.StartupViewModel
+import org.slf4j.LoggerFactory
+
+fun NavGraphBuilder.baseNavGraph(navController: NavController, appViewModel: AppViewModel) {
+    val log = LoggerFactory.getLogger("Navigation")
+
+    // startup is the default navigation route
+    composable(
+        route = "${Screen.Startup.route}?next={next}",
+        arguments = listOf(
+            navArgument("next") { type = NavType.StringType; nullable = true }
+        ),
+    ) {
+        val nextScreenLink = it.arguments?.getString("next")
+
+        val nextWalletId = when {
+            nextScreenLink == null -> null
+            nextScreenLink.startsWith("zeeygo:swapinwallet") -> nextScreenLink.split("/").lastOrNull()
+            nextScreenLink.contains("zeeygo:notifications") -> nextScreenLink.split("/").lastOrNull()
+            nextScreenLink.contains("zeeygo:payments") -> nextScreenLink.split("/").takeIf { it.size == 3 }?.get(1)
+            else -> null
+        }?.let { WalletId(it) }
+
+        val startupViewModel = viewModel<StartupViewModel>(viewModelStoreOwner = it, factory = StartupViewModel.Factory(application))
+        StartupView(
+            appViewModel = appViewModel,
+            startupViewModel = startupViewModel,
+            onShowIntro = { navController.navigate(Screen.Intro.route) },
+            onSeedNotFound = { navController.navigate(Screen.InitWalletGraph.route) },
+            onManualRecoveryClick = { navController.navigate(Screen.StartupRecovery.route) },
+            onWalletReady = {
+                try {
+                    val next = nextScreenLink?.takeUnless { it.isBlank() }?.toUri()
+                    if (next == null) {
+                        log.debug("redirecting from startup to home")
+                        navController.popToHome()
+                    } else if (!navController.graph.hasDeepLink(next)) {
+                        log.debug("redirecting from startup to home, ignoring invalid next=[$nextScreenLink]")
+                        navController.popToHome()
+                    } else {
+                        log.debug("redirecting from startup to {}", next)
+                        navController.navigate(next, navOptions = navOptions {
+                            popUpTo(navController.graph.id) { inclusive = true }
+                        })
+                    }
+                } catch(e: Exception) {
+                    log.error("error in on-wallet-ready callback: ", e)
+                }
+            },
+            forceWalletId = nextWalletId
+        )
+    }
+
+    composable(Screen.StartupRecovery.route) {
+        StartupRecoveryView(
+            onBackClick = { navController.popBackStack() },
+            onRecoveryDone = { walletId ->
+                appViewModel.listAvailableWallets(onDone = {
+                    appViewModel.switchToWallet(walletId)
+                    navController.navigate(Screen.Startup.route)
+                })
+            },
+        )
+    }
+
+    composable(Screen.Intro.route) {
+        IntroView(onFinishClick = { navController.navigate(Screen.Startup.route) })
+    }
+
+    navigation(startDestination = Screen.InitWalletGraph.InitWallet.route, route = Screen.InitWalletGraph.route) {
+        composable(Screen.InitWalletGraph.InitWallet.route) {
+            InitNewWallet(
+                navController = navController,
+                onCreateWalletClick = { navController.navigate(Screen.InitWalletGraph.CreateWallet.route) },
+                onRestoreWalletClick = { navController.navigate(Screen.InitWalletGraph.RestoreWallet.route) },
+            )
+        }
+
+        composable(Screen.InitWalletGraph.CreateWallet.route) {
+            CreateWalletView(
+                navController = navController,
+                onWalletCreationDone = { walletId ->
+                    appViewModel.listAvailableWallets(onDone = {
+                        appViewModel.switchToWallet(walletId)
+                        navController.navigate(Screen.Startup.route)
+                    }
+                )
+            })
+        }
+
+        composable(Screen.InitWalletGraph.RestoreWallet.route) {
+            RestoreWalletView(
+                navController=  navController,
+                onRestoreDone = { walletId ->
+                    appViewModel.listAvailableWallets(onDone = {
+                        appViewModel.switchToWallet(walletId)
+                        navController.navigate(Screen.Startup.route)
+                    }
+                )
+            })
+        }
+    }
+}
